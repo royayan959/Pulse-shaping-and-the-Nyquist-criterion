@@ -1,0 +1,296 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ============================================================
+# EXPERIMENT 7: Pulse Shaping and the Nyquist Criterion
+# Digital Communication Laboratory
+# ============================================================
+
+# ----------------------- PARAMETERS --------------------------
+T = 1.0                 # Symbol period (normalised)
+SPS = 32                # Samples per symbol
+SPAN = 8                # Filter span in symbols (each side)
+ALPHAS = [0.0, 0.25, 0.5, 1.0]
+N_SYMBOLS = 24
+SEED = 7
+
+
+def rc_pulse(t, T=1.0, alpha=0.25):
+    """Raised-cosine impulse response with removable singularities handled."""
+    t = np.asarray(t, dtype=float)
+    x = t / T
+
+    if alpha == 0:
+        h = np.sinc(x)
+        return h.item() if h.ndim == 0 else h
+
+    h = np.zeros_like(x)
+    zero = np.isclose(x, 0.0, atol=1e-12)
+    singular = np.isclose(np.abs(x), 1.0 / (2.0 * alpha), atol=1e-10)
+    regular = ~(zero | singular)
+
+    h[zero] = 1.0
+    h[singular] = (alpha / 2.0) * np.sin(np.pi / (2.0 * alpha))
+
+    h[regular] = (
+        np.sinc(x[regular])
+        * np.cos(np.pi * alpha * x[regular])
+        / (1.0 - (2.0 * alpha * x[regular]) ** 2)
+    )
+
+    return h.item() if h.ndim == 0 else h
+
+
+def rrc_pulse(t, T=1.0, alpha=0.25):
+    """Root-raised-cosine impulse response with special cases handled."""
+    t = np.asarray(t, dtype=float)
+    x = t / T
+
+    if alpha == 0:
+        h = np.sinc(x)
+        return h.item() if h.ndim == 0 else h
+
+    h = np.zeros_like(x)
+    zero = np.isclose(x, 0.0, atol=1e-12)
+    singular = np.isclose(np.abs(x), 1.0 / (4.0 * alpha), atol=1e-10)
+    regular = ~(zero | singular)
+
+    # Limit at t = 0
+    h[zero] = 1.0 - alpha + (4.0 * alpha / np.pi)
+
+    # Limit at t = +/-T/(4 alpha)
+    h[singular] = (
+        alpha / np.sqrt(2.0)
+        * (
+            (1.0 + 2.0 / np.pi) * np.sin(np.pi / (4.0 * alpha))
+            + (1.0 - 2.0 / np.pi) * np.cos(np.pi / (4.0 * alpha))
+        )
+    )
+
+    numerator = (
+        np.sin(np.pi * x[regular] * (1.0 - alpha))
+        + 4.0 * alpha * x[regular]
+        * np.cos(np.pi * x[regular] * (1.0 + alpha))
+    )
+    denominator = (
+        np.pi * x[regular]
+        * (1.0 - (4.0 * alpha * x[regular]) ** 2)
+    )
+
+    h[regular] = numerator / denominator
+    return h.item() if h.ndim == 0 else h
+
+
+def unit_impulse_train(symbols, sps):
+    """Upsample a symbol sequence by inserting sps-1 zeros."""
+    upsampled = np.zeros(len(symbols) * sps)
+    upsampled[::sps] = symbols
+    return upsampled
+
+
+def fft_frequency_response(h, dt):
+    """Return centred frequency axis and normalised magnitude spectrum."""
+    H = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(h))) * dt
+    f = np.fft.fftshift(np.fft.fftfreq(len(h), d=dt))
+
+    magnitude = np.abs(H)
+    peak = np.max(magnitude)
+    if peak > 0:
+        magnitude = magnitude / peak
+
+    return f, magnitude
+
+
+# ------------------ TIME GRID AND PULSES ----------------------
+dt = T / SPS
+t = np.arange(-SPAN * T, SPAN * T + dt, dt)
+
+# Expected effect before simulation:
+# Increasing alpha should increase bandwidth and reduce the
+# duration of the main pulse/ringing in the time domain.
+
+# 1. Compare rectangular, sinc, RC and RRC pulses
+rectangular = (np.abs(t) <= T / 2).astype(float)
+sinc_pulse = np.sinc(t / T)
+
+plt.figure(figsize=(10, 6))
+plt.plot(t / T, rectangular, label="Rectangular")
+plt.plot(t / T, sinc_pulse, label="Sinc")
+plt.plot(t / T, rc_pulse(t, T, 0.5), label="Raised-cosine (alpha=0.5)")
+plt.plot(t / T, rrc_pulse(t, T, 0.5), label="Root-raised-cosine (alpha=0.5)")
+plt.title("Comparison of Pulse Shapes")
+plt.xlabel("Time / T")
+plt.ylabel("Amplitude")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# 2. RC impulse and frequency responses for alpha = 0, 0.25, 0.5, 1
+fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+
+for alpha in ALPHAS:
+    h = rc_pulse(t, T, alpha)
+    f, mag = fft_frequency_response(h, dt)
+
+    axes[0].plot(t / T, h, label=f"alpha={alpha}")
+    axes[1].plot(
+        f * T,
+        20 * np.log10(np.maximum(mag, 1e-8)),
+        label=f"alpha={alpha}"
+    )
+
+axes[0].set_title("Raised-Cosine Impulse Responses")
+axes[0].set_xlabel("Time / T")
+axes[0].set_ylabel("Amplitude")
+axes[0].set_xlim(-4, 4)
+axes[0].grid(True)
+axes[0].legend()
+
+axes[1].set_title("Raised-Cosine Frequency Responses")
+axes[1].set_xlabel("Normalised frequency fT")
+axes[1].set_ylabel("Magnitude (dB)")
+axes[1].set_xlim(-1.2, 1.2)
+axes[1].set_ylim(-80, 5)
+axes[1].grid(True)
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+
+# 3. Mandatory Nyquist zero-crossing validation for RC pulse
+print("\nNYQUIST ZERO-CROSSING VALIDATION (RC PULSE)")
+
+for alpha in ALPHAS:
+    sample_n = np.arange(-6, 7)
+    sample_values = rc_pulse(sample_n * T, T, alpha)
+
+    print(f"\nRoll-off factor alpha = {alpha}")
+    print(" n\t t/T\t\t p(nT)")
+
+    for n, value in zip(sample_n, sample_values):
+        print(f" {n:+d}\t {n:+d}\t\t {value:+.6e}")
+
+# 4. Create an upsampled symbol impulse train and pulse-shape it
+rng = np.random.default_rng(SEED)
+symbols = rng.choice([-1.0, 1.0], size=N_SYMBOLS)
+
+upsampled = unit_impulse_train(symbols, SPS)
+train_time = np.arange(len(upsampled)) * dt
+
+alpha_demo = 0.5
+h_rc = rc_pulse(t, T, alpha_demo)
+shaped = np.convolve(upsampled, h_rc, mode="same")
+
+plt.figure(figsize=(10, 5))
+plt.plot(
+    train_time[:12 * SPS],
+    upsampled[:12 * SPS],
+    drawstyle="steps-mid"
+)
+plt.title("Upsampled Symbol Impulse Train (First 12 Symbols)")
+plt.xlabel("Time")
+plt.ylabel("Amplitude")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 5))
+plt.plot(train_time[:12 * SPS], shaped[:12 * SPS])
+plt.title("Raised-Cosine Pulse-Shaped Symbol Stream (alpha=0.5)")
+plt.xlabel("Time")
+plt.ylabel("Amplitude")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# 5. Cascade transmitter and receiver RRC filters
+# Expected effect: RRC * RRC should approximate an RC response.
+fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+
+for alpha in ALPHAS:
+    h_rrc = rrc_pulse(t, T, alpha)
+    h_overall = np.convolve(h_rrc, h_rrc, mode="full") * dt
+    t_overall = (
+        np.arange(len(h_overall)) * dt
+        - (len(h_overall) - 1) * dt / 2
+    )
+    f, mag = fft_frequency_response(h_overall, dt)
+
+    axes[0].plot(t_overall / T, h_overall, label=f"alpha={alpha}")
+    axes[1].plot(
+        f * T,
+        20 * np.log10(np.maximum(mag, 1e-8)),
+        label=f"alpha={alpha}"
+    )
+
+axes[0].set_title("Cascaded RRC Transmitter + Receiver")
+axes[0].set_xlabel("Time / T")
+axes[0].set_ylabel("Amplitude")
+axes[0].set_xlim(-4, 4)
+axes[0].grid(True)
+axes[0].legend()
+
+axes[1].set_title("Frequency Response of Cascaded RRC Filters")
+axes[1].set_xlabel("Normalised frequency fT")
+axes[1].set_ylabel("Magnitude (dB)")
+axes[1].set_xlim(-1.2, 1.2)
+axes[1].set_ylim(-80, 5)
+axes[1].grid(True)
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+
+# 6. Mandatory tabulation of the overall RC response
+# at integer symbol intervals
+print("\nMANDATORY VALIDATION: OVERALL RRC CASCADE")
+
+alpha = 0.5
+h_rrc = rrc_pulse(t, T, alpha)
+h_overall = np.convolve(h_rrc, h_rrc, mode="full") * dt
+
+centre = len(h_overall) // 2
+sample_n = np.arange(-6, 7)
+indices = centre + sample_n * SPS
+centre_value = h_overall[centre]
+
+print(f"Using alpha={alpha}, span={SPAN}T, SPS={SPS}")
+print(" n\t t/T\t\t overall response\t normalised")
+
+for n, idx in zip(sample_n, indices):
+    value = h_overall[idx]
+    normalised = value / centre_value
+
+    print(
+        f" {n:+d}\t {n:+d}\t\t "
+        f"{value:+.6e}\t {normalised:+.6e}"
+    )
+
+# 7. Bandwidth versus roll-off factor
+bandwidths = [(1.0 + alpha) / (2.0 * T) for alpha in ALPHAS]
+
+plt.figure(figsize=(8, 5))
+plt.plot(ALPHAS, bandwidths, marker="o")
+plt.title("Theoretical Raised-Cosine Bandwidth vs Roll-off Factor")
+plt.xlabel("Roll-off factor alpha")
+plt.ylabel("One-sided baseband bandwidth B")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+print("\nBANDWIDTH TABLE")
+print("alpha\tB=(1+alpha)/(2T), with T=1")
+
+for alpha, bandwidth in zip(ALPHAS, bandwidths):
+    print(f"{alpha:.2f}\t{bandwidth:.6f}")
+
+print("\nOBSERVATION AND INTERPRETATION")
+print("1. Increasing alpha increases theoretical bandwidth.")
+print("2. The RC pulse has zero crossings at nonzero integer symbol intervals.")
+print("3. Cascading two RRC filters produces an overall RC response.")
+print("4. Small residual errors occur because filters are time-truncated and sampled.")
+
+print("\nCONCLUSION")
+print("The experiment verifies pulse shaping, the Nyquist zero-ISI criterion,")
+print("the effect of roll-off factor, and the RRC transmitter-receiver cascade.")
